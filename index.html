@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Planificador de Colectivos</title>
+    
+    <link rel="manifest" href="./manifest.json">
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.css" />
+    <script src="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+    <style>
+        body { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; height: 100vh; background-color: #f0f2f5; }
+
+        #barra-superior { background-color: #343a40; padding: 10px; display: flex; justify-content: center; z-index: 2; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
+        select { padding: 8px; font-size: 16px; border-radius: 6px; font-weight: bold; width: 90%; max-width: 400px; }
+
+        #mapa { flex-grow: 1; width: 100%; z-index: 1; }
+
+        #panel-controles { background-color: white; padding: 10px 15px; padding-bottom: calc(10px + env(safe-area-inset-bottom)); box-shadow: 0 -2px 10px rgba(0,0,0,0.1); z-index: 2; display: flex; flex-direction: column; gap: 8px; }
+
+        .fila-botones { display: flex; gap: 8px; width: 100%; }
+
+        .btn { flex: 1; padding: 12px 5px; border: none; border-radius: 8px; font-size: 14px; font-weight: bold; color: white; cursor: pointer; box-shadow: 0 2px 4px rgba(0,0,0,0.2); text-align: center; }
+        
+        .btn-inicio { background-color: #28a745; }
+        .btn-paso { background-color: #6f42c1; }
+        .btn-fin { background-color: #dc3545; }
+        
+        .btn-limpiar { background-color: #6c757d; font-size: 14px; padding: 10px; margin-top: 5px; }
+        .btn-pdf { background-color: #17a2b8; font-size: 18px; padding: 15px; display: none; margin-top: 5px; }
+
+        /* Estilo para el botón de borrar dentro del globito del mapa */
+        .btn-borrar-punto { background-color: #dc3545; color: white; border: none; padding: 8px; border-radius: 4px; margin-top: 8px; cursor: pointer; font-weight: bold; width: 100%; font-size: 14px; }
+
+        #instrucciones { text-align: center; font-size: 14px; color: #444; margin-top: 5px; background: #e9ecef; padding: 8px; border-radius: 5px; }
+        #infoRuta { font-weight: bold; color: #0056b3; font-size: 16px; display: none; text-align: center; margin-top: 5px; }
+
+        .leaflet-routing-container { display: none !important; }
+    </style>
+</head>
+<body>
+
+    <div id="barra-superior">
+        <select id="selectorCiudad" onchange="cambiarCiudad()">
+            <option value="-38.9516,-68.0591">Neuquén Capital</option>
+            <option value="-38.9339,-67.9903">Cipolletti</option>
+            <option value="-40.8135,-62.9967">Viedma</option>
+            <option value="-39.0303,-67.5815">General Roca</option>
+        </select>
+    </div>
+
+    <div id="mapa"></div>
+
+    <div id="panel-controles">
+        <div class="fila-botones">
+            <button class="btn btn-inicio" onclick="seleccionarAccion('Inicio', '🟢')">🟢 Inicio</button>
+            <button class="btn btn-paso" onclick="seleccionarAccion('Paso Obligado', '🟣')">🟣 P. Obligado</button>
+            <button class="btn btn-fin" onclick="seleccionarAccion('Fin', '🔴')">🔴 Fin</button>
+        </div>
+        
+        <div id="instrucciones">Modo actual: <b>Observar</b></div>
+        <div id="infoRuta">Distancia: -- km | Tiempo: -- min</div>
+        
+        <button class="btn btn-pdf" id="btnPdf" onclick="generarPDF()">📄 Generar PDF del Recorrido</button>
+        <button class="btn btn-limpiar" onclick="limpiarRuta()">🗑️ Limpiar Recorrido Completo</button>
+    </div>
+
+    <script>
+        const mapa = L.map('mapa', { preferCanvas: true }).setView([-38.9516, -68.0591], 14);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap',
+            maxZoom: 19
+        }).addTo(mapa);
+
+        function cambiarCiudad() {
+            const selector = document.getElementById('selectorCiudad');
+            const coords = selector.value.split(',');
+            mapa.setView([parseFloat(coords[0]), parseFloat(coords[1])], 14);
+        }
+
+        let accionActual = null;
+        let iconoActual = null;
+        
+        let marcadorInicio = null;
+        let marcadoresPaso = []; 
+        let marcadorFin = null;
+        
+        let controlRuta = null;
+        let distanciaTotal = 0;
+        let tiempoTotal = 0;
+        let idPasoActual = 0; // Un identificador único para cada paso obligado
+
+        const textoInstrucciones = document.getElementById('instrucciones');
+        const infoRuta = document.getElementById('infoRuta');
+        const btnPdf = document.getElementById('btnPdf');
+
+        function seleccionarAccion(accion, icono) {
+            accionActual = accion;
+            iconoActual = icono;
+            textoInstrucciones.innerHTML = `Toque el mapa para colocar: <b>${icono} ${accion}</b>`;
+        }
+
+        mapa.on('click', function(evento) {
+            if (!accionActual) return;
+            const coordenadas = evento.latlng;
+
+            if (accionActual === 'Inicio') {
+                if (marcadorInicio) mapa.removeLayer(marcadorInicio);
+                marcadorInicio = L.marker(coordenadas).addTo(mapa)
+                    .bindPopup(`<b>🟢 Inicio</b><br><button class="btn-borrar-punto" onclick="borrarInicio()">❌ Borrar este punto</button>`).openPopup();
+                
+            } else if (accionActual === 'Paso Obligado') {
+                idPasoActual++;
+                let idDeEstePaso = idPasoActual; // Guardamos el ID específico para este marcador
+                let marcador = L.marker(coordenadas).addTo(mapa)
+                    .bindPopup(`<b>🟣 Paso Obligado</b><br><button class="btn-borrar-punto" onclick="borrarPaso(${idDeEstePaso})">❌ Borrar este punto</button>`).openPopup();
+                
+                marcador.pasoId = idDeEstePaso; // Se lo pegamos internamente al marcador
+                marcadoresPaso.push(marcador);
+                
+            } else if (accionActual === 'Fin') {
+                if (marcadorFin) mapa.removeLayer(marcadorFin);
+                marcadorFin = L.marker(coordenadas).addTo(mapa)
+                    .bindPopup(`<b>🔴 Fin</b><br><button class="btn-borrar-punto" onclick="borrarFin()">❌ Borrar este punto</button>`).openPopup();
+            }
+
+            trazarRuta(); // Siempre intentamos trazar la ruta por si ya hay inicio y fin
+
+            if (accionActual !== 'Paso Obligado') {
+                accionActual = null;
+                iconoActual = null;
+                textoInstrucciones.innerHTML = `Punto guardado. Modo: <b>Observar</b>`;
+            } else {
+                textoInstrucciones.innerHTML = `Puede seguir marcando <b>🟣 Pasos Obligados</b> o elegir otra acción.`;
+            }
+        });
+
+        // --- FUNCIONES PARA BORRAR PUNTOS INDIVIDUALES ---
+        function borrarInicio() {
+            if (marcadorInicio) mapa.removeLayer(marcadorInicio);
+            marcadorInicio = null;
+            trazarRuta();
+        }
+
+        function borrarFin() {
+            if (marcadorFin) mapa.removeLayer(marcadorFin);
+            marcadorFin = null;
+            trazarRuta();
+        }
+
+        function borrarPaso(id) {
+            let indice = marcadoresPaso.findIndex(m => m.pasoId === id);
+            if (indice !== -1) {
+                mapa.removeLayer(marcadoresPaso[indice]); // Lo sacamos del mapa
+                marcadoresPaso.splice(indice, 1); // Lo borramos de la lista interna
+                trazarRuta(); // Recalculamos la ruta
+            }
+        }
+        // -------------------------------------------------
+
+        function trazarRuta() {
+            // Si falta el inicio o el fin, borramos la línea y ocultamos el PDF
+            if (!marcadorInicio || !marcadorFin) {
+                if (controlRuta) {
+                    mapa.removeControl(controlRuta);
+                    controlRuta = null;
+                }
+                infoRuta.style.display = 'none';
+                btnPdf.style.display = 'none';
+                return; // Cortamos acá, no intentamos dibujar nada
+            }
+
+            if (controlRuta) mapa.removeControl(controlRuta);
+            textoInstrucciones.innerHTML = "⏳ Calculando el mejor recorrido...";
+
+            let coordenadasRuta = [marcadorInicio.getLatLng()];
+            marcadoresPaso.forEach(m => coordenadasRuta.push(m.getLatLng()));
+            coordenadasRuta.push(marcadorFin.getLatLng());
+
+            controlRuta = L.Routing.control({
+                waypoints: coordenadasRuta,
+                router: L.Routing.osrmv1({ profile: 'driving' }),
+                lineOptions: { styles: [{color: '#0056b3', opacity: 0.8, weight: 6}] },
+                createMarker: function() { return null; }, 
+                addWaypoints: false,
+                fitSelectedRoutes: true 
+            }).addTo(mapa);
+
+            controlRuta.on('routesfound', function(e) {
+                let resumen = e.routes[0].summary;
+                distanciaTotal = (resumen.totalDistance / 1000).toFixed(2); 
+                tiempoTotal = Math.round(resumen.totalTime / 60); 
+                
+                infoRuta.innerHTML = `🏁 Distancia: <b>${distanciaTotal} km</b> | ⏱️ Tiempo aprox: <b>${tiempoTotal} min</b>`;
+                infoRuta.style.display = 'block';
+                btnPdf.style.display = 'block'; 
+                textoInstrucciones.innerHTML = `Modo actual: <b>Observar</b>`;
+            });
+        }
+
+        async function generarPDF() {
+            let linea = prompt("Ingrese el número o nombre de la Línea (Ej: 501, K, Este):");
+            if (!linea) return; 
+
+            btnPdf.innerText = "⏳ Generando documento... Espere";
+            btnPdf.disabled = true;
+
+            try {
+                const { jsPDF } = window.jspdf;
+                const documento = new jsPDF('p', 'mm', 'a4'); 
+
+                documento.setFontSize(24);
+                documento.text(`Recorrido Linea: ${linea}`, 15, 20);
+                
+                documento.setFontSize(14);
+                documento.text(`Distancia Total: ${distanciaTotal} km`, 15, 30);
+                documento.text(`Tiempo Estimado de vuelta: ${tiempoTotal} minutos`, 15, 40);
+
+                const elementoMapa = document.getElementById('mapa');
+                const canvas = await html2canvas(elementoMapa, { 
+                    useCORS: true, 
+                    scale: 2 
+                });
+                
+                const imagenMapa = canvas.toDataURL('image/jpeg', 0.8);
+                const anchoImagen = 180;
+                const altoImagen = (canvas.height * anchoImagen) / canvas.width;
+
+                documento.addImage(imagenMapa, 'JPEG', 15, 50, anchoImagen, altoImagen);
+                documento.save(`Linea_${linea}.pdf`);
+
+            } catch(error) {
+                alert("Hubo un problema al generar el PDF. " + error.message);
+                console.error(error);
+            } finally {
+                btnPdf.innerText = "📄 Generar PDF del Recorrido";
+                btnPdf.disabled = false;
+            }
+        }
+
+        function limpiarRuta() {
+            if (marcadorInicio) mapa.removeLayer(marcadorInicio);
+            if (marcadorFin) mapa.removeLayer(marcadorFin);
+            marcadoresPaso.forEach(m => mapa.removeLayer(m));
+            if (controlRuta) mapa.removeControl(controlRuta);
+            
+            marcadorInicio = null;
+            marcadorFin = null;
+            marcadoresPaso = [];
+            controlRuta = null;
+            idPasoActual = 0; // Reiniciamos el contador
+            
+            infoRuta.style.display = 'none';
+            btnPdf.style.display = 'none';
+            textoInstrucciones.innerHTML = `Recorrido limpiado. Modo actual: <b>Observar</b>`;
+        }
+
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./sw.js');
+            });
+        }
+    </script>
+</body>
+</html>
